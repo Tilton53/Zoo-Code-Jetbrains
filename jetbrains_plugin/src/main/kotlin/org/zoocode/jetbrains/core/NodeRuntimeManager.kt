@@ -11,14 +11,21 @@ import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.util.SystemInfo
-import com.intellij.util.io.Decompressor
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
+import java.util.zip.GZIPInputStream
+import java.util.zip.ZipInputStream
 
 /**
  * Managed Node.js runtime manager
@@ -318,11 +325,109 @@ object NodeRuntimeManager {
      * Extract a Node.js distribution archive into the destination directory
      */
     private fun extractArchive(archive: File, archiveExtension: String, destDir: File) {
-        if (archiveExtension == "zip") {
-            Decompressor.Zip(archive).extract(destDir)
-        } else {
-            Decompressor.Tar(archive).extract(destDir)
+        if (!destDir.exists() && !destDir.mkdirs()) {
+            throw IOException("Cannot create archive destination: ${destDir.absolutePath}")
         }
+        if (archiveExtension == "zip") {
+            extractZip(archive, destDir)
+        } else {
+            extractTarGz(archive, destDir)
+        }
+    }
+
+    private fun extractZip(archive: File, destDir: File) {
+        ZipInputStream(archive.inputStream().buffered()).use { input ->
+            while (true) {
+                val entry = input.nextEntry ?: break
+                val target = safeArchiveTarget(destDir, entry.name)
+                if (entry.isDirectory) {
+                    Files.createDirectories(target)
+                } else {
+                    Files.createDirectories(target.parent)
+                    Files.newOutputStream(target).use { output -> input.copyTo(output) }
+                }
+                input.closeEntry()
+            }
+        }
+    }
+
+    private fun extractTarGz(archive: File, destDir: File) {
+        val pendingLinks = mutableListOf<Pair<Path, TarArchiveEntry>>()
+        TarArchiveInputStream(GZIPInputStream(archive.inputStream().buffered())).use { input ->
+            while (true) {
+                val entry = input.nextEntry ?: break
+                val target = safeArchiveTarget(destDir, entry.name)
+                when {
+                    entry.isDirectory -> Files.createDirectories(target)
+                    entry.isSymbolicLink || entry.isLink -> pendingLinks.add(target to entry)
+                    entry.isFile -> {
+                        Files.createDirectories(target.parent)
+                        Files.newOutputStream(target).use { output -> input.copyTo(output) }
+                        applyPosixPermissions(target, entry.mode)
+                    }
+                }
+            }
+        }
+
+        pendingLinks.forEach { (target, entry) ->
+            Files.createDirectories(target.parent)
+            if (entry.isSymbolicLink) {
+                val linkTarget = Path.of(entry.linkName)
+                val resolvedLinkTarget = if (linkTarget.isAbsolute) {
+                    linkTarget.normalize()
+                } else {
+                    target.parent.resolve(linkTarget).normalize()
+                }
+                val root = destDir.toPath().toAbsolutePath().normalize()
+                if (!resolvedLinkTarget.startsWith(root)) {
+                    throw IOException("Archive link escapes destination: ${entry.name} -> ${entry.linkName}")
+                }
+                Files.createSymbolicLink(target, linkTarget)
+            } else {
+                val linkTarget = safeArchiveTarget(destDir, entry.linkName)
+                Files.createLink(target, linkTarget)
+            }
+        }
+    }
+
+    private fun applyPosixPermissions(path: Path, mode: Int) {
+        val permissions = mutableSetOf<PosixFilePermission>()
+        if (mode and 0b100_000_000 != 0) permissions.add(PosixFilePermission.OWNER_READ)
+        if (mode and 0b010_000_000 != 0) permissions.add(PosixFilePermission.OWNER_WRITE)
+        if (mode and 0b001_000_000 != 0) permissions.add(PosixFilePermission.OWNER_EXECUTE)
+        if (mode and 0b000_100_000 != 0) permissions.add(PosixFilePermission.GROUP_READ)
+        if (mode and 0b000_010_000 != 0) permissions.add(PosixFilePermission.GROUP_WRITE)
+        if (mode and 0b000_001_000 != 0) permissions.add(PosixFilePermission.GROUP_EXECUTE)
+        if (mode and 0b000_000_100 != 0) permissions.add(PosixFilePermission.OTHERS_READ)
+        if (mode and 0b000_000_010 != 0) permissions.add(PosixFilePermission.OTHERS_WRITE)
+        if (mode and 0b000_000_001 != 0) permissions.add(PosixFilePermission.OTHERS_EXECUTE)
+        try {
+            Files.setPosixFilePermissions(path, permissions)
+        } catch (_: UnsupportedOperationException) {
+            // Windows and other non-POSIX file systems do not expose Unix mode bits.
+        }
+    }
+
+    /**
+     * Resolve an archive entry without allowing it to escape the destination directory.
+     */
+    private fun safeArchiveTarget(destDir: File, entryName: String): Path {
+        val root = destDir.toPath().toAbsolutePath().normalize()
+        val target = root.resolve(entryName).normalize()
+        if (!target.startsWith(root)) {
+            throw IOException("Archive entry escapes destination: $entryName")
+        }
+
+        // Refuse to write through a symlink left by a partially extracted archive.
+        var current = target.parent
+        while (current != null && current.startsWith(root)) {
+            if (Files.isSymbolicLink(current) || Files.exists(current, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(current)) {
+                throw IOException("Archive entry has an unsafe parent: $entryName")
+            }
+            if (current == root) break
+            current = current.parent
+        }
+        return target
     }
 
     private fun failureMarkerFile(version: String): File {

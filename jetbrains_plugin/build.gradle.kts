@@ -229,6 +229,7 @@ repositories {
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.10.0")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("org.apache.commons:commons-compress:1.27.1")
     testImplementation("junit:junit:4.13.2")
     detektPlugins("io.gitlab.arturbosch.detekt:detekt-formatting:1.23.4")
 }
