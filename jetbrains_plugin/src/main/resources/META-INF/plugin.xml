@@ -104,6 +104,9 @@ SPDX-License-Identifier: Apache-2.0
     <!-- Product and plugin compatibility requirements.
          Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
     <depends>com.intellij.modules.platform</depends>
+    <!-- JCEF moved from the platform classloader into this bundled plugin in 2026.2 (build 262).
+         Keep the dependency optional because older supported IDEs expose JCEF directly from the platform. -->
+    <depends optional="true">com.intellij.modules.jcef</depends>
     <depends>org.jetbrains.plugins.terminal</depends>
     
     <!-- Extension points defined by the plugin.
