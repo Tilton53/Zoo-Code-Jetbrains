@@ -8,6 +8,7 @@ import com.intellij.execution.configurations.PathEnvironmentVariableUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.util.SystemInfo
+import com.intellij.util.EnvironmentUtil
 import org.zoocode.jetbrains.plugin.DEBUG_MODE
 import org.zoocode.jetbrains.plugin.WecoderPluginService
 import org.zoocode.jetbrains.util.PluginResourceUtil
@@ -40,6 +41,13 @@ class ExtensionProcessManager : Disposable {
         
         // Minimum required Node.js version
         private val MIN_REQUIRED_NODE_VERSION = NodeVersion(20, 6, 0, "20.6.0")
+
+        // Shell session-transient variables that must not leak into the extension
+        // process environment (PWD would point at the login shell's directory)
+        private val TRANSIENT_SHELL_VARS = setOf("PWD", "OLDPWD", "SHLVL", "_")
+
+        // Matches userinfo credentials embedded in URLs such as http://user:pass@host
+        private val URL_USERINFO_REGEX = Regex("://[^/\\s:@]+:[^/\\s@]+@")
     }
     
     private val LOG = Logger.getInstance(ExtensionProcessManager::class.java)
@@ -113,7 +121,7 @@ class ExtensionProcessManager : Disposable {
             
             LOG.info("Starting extension process with node: $nodePath, entry: $extensionPath")
 
-            val envVars = HashMap<String, String>(System.getenv())
+            val envVars = buildBaseEnvironment()
             
             // Build complete PATH
             envVars["PATH"] = buildEnhancedPath(envVars, nodePath)
@@ -158,10 +166,10 @@ class ExtensionProcessManager : Disposable {
             // Create process builder
             val builder = ProcessBuilder(commandArgs)
 
-            // Print environment variables
+            // Print environment variables (values redacted for sensitive keys)
             LOG.info("Environment variables:")
             envVars.forEach { (key, value) ->
-                LOG.info("  $key = $value")
+                LOG.info("  $key = ${redactEnvValue(key, value)}")
             }
             builder.environment().putAll(envVars)
 
@@ -288,6 +296,41 @@ class ExtensionProcessManager : Disposable {
         LOG.info("Extension process stopped")
     }
     
+    /**
+     * Build the base environment for the extension process.
+     *
+     * GUI-launched IDEs do not inherit the user's login shell environment, so
+     * variables such as AWS_PROFILE, AWS_REGION, or cloud credential helpers are
+     * missing and SDK default credential/region chains resolve differently than
+     * in a terminal-launched VS Code. Merge the login-shell environment for keys
+     * the IDE process does not already define.
+     */
+    private fun buildBaseEnvironment(): MutableMap<String, String> {
+        val envVars = HashMap<String, String>(System.getenv())
+        try {
+            val shellEnv = EnvironmentUtil.getEnvironmentMap()
+            val mergedKeys = mutableListOf<String>()
+            for ((key, value) in shellEnv) {
+                if (!key.equals("PATH", ignoreCase = true) && key !in TRANSIENT_SHELL_VARS && !envVars.containsKey(key)) {
+                    envVars[key] = value
+                    mergedKeys.add(key)
+                }
+            }
+            if (mergedKeys.isNotEmpty()) {
+                LOG.info("Merged ${mergedKeys.size} login-shell environment variables into extension process environment: ${mergedKeys.joinToString()}")
+            }
+        } catch (e: Exception) {
+            LOG.warn("Failed to read login shell environment, using IDE process environment only", e)
+        }
+        return envVars
+    }
+
+    private fun redactEnvValue(key: String, value: String): String {
+        val sensitiveMarkers = listOf("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "SESSION", "AUTH")
+        if (sensitiveMarkers.any { key.uppercase().contains(it) }) return "<redacted>"
+        return URL_USERINFO_REGEX.replace(value, "://<redacted>@")
+    }
+
     /**
      * Find Node.js executable
      */
