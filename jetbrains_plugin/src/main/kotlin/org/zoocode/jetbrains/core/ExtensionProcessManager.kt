@@ -41,6 +41,13 @@ class ExtensionProcessManager : Disposable {
         
         // Minimum required Node.js version
         private val MIN_REQUIRED_NODE_VERSION = NodeVersion(20, 6, 0, "20.6.0")
+
+        // Shell session-transient variables that must not leak into the extension
+        // process environment (PWD would point at the login shell's directory)
+        private val TRANSIENT_SHELL_VARS = setOf("PWD", "OLDPWD", "SHLVL", "_")
+
+        // Matches userinfo credentials embedded in URLs such as http://user:pass@host
+        private val URL_USERINFO_REGEX = Regex("://[^/\\s:@]+:[^/\\s@]+@")
     }
     
     private val LOG = Logger.getInstance(ExtensionProcessManager::class.java)
@@ -304,7 +311,7 @@ class ExtensionProcessManager : Disposable {
             val shellEnv = EnvironmentUtil.getEnvironmentMap()
             val mergedKeys = mutableListOf<String>()
             for ((key, value) in shellEnv) {
-                if (!key.equals("PATH", ignoreCase = true) && !envVars.containsKey(key)) {
+                if (!key.equals("PATH", ignoreCase = true) && key !in TRANSIENT_SHELL_VARS && !envVars.containsKey(key)) {
                     envVars[key] = value
                     mergedKeys.add(key)
                 }
@@ -320,7 +327,8 @@ class ExtensionProcessManager : Disposable {
 
     private fun redactEnvValue(key: String, value: String): String {
         val sensitiveMarkers = listOf("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "SESSION", "AUTH")
-        return if (sensitiveMarkers.any { key.uppercase().contains(it) }) "<redacted>" else value
+        if (sensitiveMarkers.any { key.uppercase().contains(it) }) return "<redacted>"
+        return URL_USERINFO_REGEX.replace(value, "://<redacted>@")
     }
 
     /**
