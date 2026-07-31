@@ -71,7 +71,9 @@ jobs:
 
       - name: Build release extension
         if: steps.tag-check.outputs.on_mainline == 'true'
-        run: ./scripts/build.sh --mode release --clean --verbose
+        run: |
+          ln -s deps/vscode vscode
+          ./scripts/build.sh --mode release --clean --verbose
 
       - name: Create GitHub release
         if: steps.tag-check.outputs.on_mainline == 'true'
