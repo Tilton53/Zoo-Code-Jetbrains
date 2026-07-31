@@ -70,7 +70,10 @@ jobs:
 
       - name: Build release extension
         if: steps.tag-check.outputs.on_mainline == 'true'
-        run: ./scripts/build.sh --mode release --clean
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash -x ./scripts/build.sh --mode release --clean
 
       - name: Create GitHub release
         if: steps.tag-check.outputs.on_mainline == 'true'
